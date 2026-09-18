@@ -2287,6 +2287,218 @@ function parseSupportedSheet(workbook,sheetName,pricingMap){
 
   return groups.filter(g=>g.products.length);
 }
+
+function parseMobileNASheet(workbook,pricingMap){
+  const sheet=workbook.Sheets["Mobile_NA"];
+  if(!sheet)throw new Error("Mobile_NA is missing.");
+
+  const cols=detectColumns(sheet);
+  const range=XLSX.utils.decode_range(sheet["!ref"]||"A1:A1");
+  const directAt=(r,c)=>c<0?"":exactCellText(sheet,XLSX.utils.encode_cell({r,c}));
+  const merges=sheet["!merges"]||[];
+
+  const mergeContaining=(r,c)=>merges.find(m=>m.s.r<=r&&m.e.r>=r&&m.s.c<=c&&m.e.c>=c)||null;
+  const verticalMergeAt=(r,c)=>{
+    const m=mergeContaining(r,c);
+    return m && m.s.c===c && m.e.c===c && m.e.r>m.s.r ? m : null;
+  };
+  const wideMergeAt=(r,c)=>{
+    const m=mergeContaining(r,c);
+    return m && (m.e.c-m.s.c)>=2 ? m : null;
+  };
+
+  const partAt=(r)=>{
+    // Never inherit a part number from a merged cell. A product exists only
+    // when the actual Art. no. cell on that Excel row contains a value.
+    const addr=XLSX.utils.encode_cell({r,c:cols.art});
+    return exactCellText(sheet,addr);
+  };
+
+  const groups=[];
+  let currentFamily="";
+  let currentFamilyTitle="";
+  let currentSection="";
+  let recentVariantRows=[];
+  let previousProduct=null;
+  const seen=new Set();
+  let numberedRows=0;
+  let repeatedRows=0;
+
+  const ensureGroup=(title)=>{
+    const clean=(title||"Mobile").trim();
+    let g=groups.find(x=>x.title===clean);
+    if(!g){
+      g={title:clean,products:[]};
+      groups.push(g);
+    }
+    return g;
+  };
+
+  const baseName=(name)=>{
+    return String(name||"")
+      .toLowerCase()
+      .replace(/\([^)]*\)/g,"")
+      .replace(/\b\d+(?:\.\d+)?\s*m\b/g,"")
+      .replace(/[-_/]?\d+[a-z]?$/i,"")
+      .replace(/[^a-z]+/g," ")
+      .trim()
+      .split(/\s+/)[0]||"";
+  };
+
+  const isMajorHeading=(r,b,c,d)=>{
+    if(!b || c)return false;
+    if(wideMergeAt(r,cols.type))return true;
+    return /^(PORTABLE UNITS|MOBILE UNITS)$/i.test(b.trim()) || !!d;
+  };
+
+  const isFamilyHeader=(r,b,c)=>{
+    if(!b || !c)return false;
+    const bm=verticalMergeAt(r,cols.type);
+    return !!bm && bm.s.r===r;
+  };
+
+  for(let r=cols.headerRow+1;r<=range.e.r;r++){
+    if(sheet["!rows"]?.[r]?.hidden)continue;
+
+    const b=directAt(r,cols.type).trim();
+    const c=directAt(r,cols.description).trim();
+    const d=directAt(r,cols.specification).trim();
+    const part=partAt(r).trim();
+    const key=normalizePartNumber(part);
+
+    if(key){
+      numberedRows++;
+
+      // The workbook repeats some accessories under more than one mobile unit.
+      // Keep one portal product per part number and preserve the first Excel placement.
+      if(seen.has(key)){
+        repeatedRows++;
+        continue;
+      }
+      seen.add(key);
+
+      let name="";
+      let description="";
+
+      if(b){
+        name=b;
+        if(c && c!==b)description=c;
+      }else if(c){
+        name=c;
+      }else{
+        name=part;
+      }
+
+      // Carry a short shared description only within the same immediate product family,
+      // e.g. Flex-3 -> Flex-4, UltraFlex 3 -> UltraFlex-4, KUA-160/2S -> /3S -> /4S.
+      if(!description && previousProduct){
+        const currentBase=baseName(name);
+        const previousBase=baseName(previousProduct.name);
+        if(currentBase && currentBase===previousBase && previousProduct.description){
+          description=previousProduct.description;
+        }
+      }
+
+      const pricing=pricingMap.get(key)||{};
+      const sectionTitle=currentSection||currentFamilyTitle||currentFamily||"Mobile";
+      const group=ensureGroup(sectionTitle);
+
+      const product={
+        name,
+        productType:currentFamily||b||"Mobile_NA",
+        description,
+        specifications:d,
+        partNumber:part,
+        matchKey:key,
+        priceA:pricing.priceA,
+        priceB:pricing.priceB,
+        sourceRow:r
+      };
+      group.products.push(product);
+
+      // Rows with product names in column C usually form variants followed by
+      // one shared long description on a later row.
+      if(!b){
+        recentVariantRows.push(product);
+      }else{
+        recentVariantRows=[];
+      }
+      previousProduct=product;
+      continue;
+    }
+
+    // Major catalogue divider such as PORTABLE UNITS or MOBILE UNITS.
+    if(isMajorHeading(r,b,c,d)){
+      currentFamily="";
+      currentFamilyTitle="";
+      currentSection="";
+      recentVariantRows=[];
+      previousProduct=null;
+      continue;
+    }
+
+    // Product-family header, e.g. PHV + Portable welding fume extractor,
+    // MFD + Mobile welding fume extractor with disposable filter.
+    if(isFamilyHeader(r,b,c)){
+      currentFamily=b;
+      currentFamilyTitle=`${b} - ${c}`;
+      currentSection=currentFamilyTitle;
+      recentVariantRows=[];
+      previousProduct=null;
+      continue;
+    }
+
+    // Subsection heading in column B, e.g. Options and accessories,
+    // Replacement filters, Extraction arm/hose.
+    if(b && !c){
+      currentSection=currentFamily
+        ? `${currentFamily} - ${b}`
+        : b;
+      recentVariantRows=[];
+      previousProduct=null;
+      continue;
+    }
+
+    // A C-only text row directly after one or more C-named variants is their
+    // shared description. Do not create a product or a section from it.
+    if(!b && c && recentVariantRows.length){
+      recentVariantRows.forEach(p=>{
+        if(!p.description)p.description=c;
+      });
+      recentVariantRows=[];
+      previousProduct=null;
+      continue;
+    }
+  }
+
+  // Sort exactly in the same top-to-bottom sequence as Mobile_NA.
+  groups.forEach(g=>g.products.sort((a,b)=>(a.sourceRow??0)-(b.sourceRow??0)));
+
+  // Safety audit: every unique real Art. no. on Mobile_NA must be represented.
+  const directUnique=new Set();
+  let directNumberedRows=0;
+  for(let r=cols.headerRow+1;r<=range.e.r;r++){
+    if(sheet["!rows"]?.[r]?.hidden)continue;
+    const part=partAt(r).trim();
+    const key=normalizePartNumber(part);
+    if(!key)continue;
+    directNumberedRows++;
+    directUnique.add(key);
+  }
+  const parsedKeys=new Set(groups.flatMap(g=>g.products.map(p=>p.matchKey).filter(Boolean)));
+  const missing=[...directUnique].filter(k=>!parsedKeys.has(k));
+  if(missing.length){
+    throw new Error(`Mobile_NA validation failed: ${missing.length} unique numbered product(s) were not recognized. Import stopped before writing to Firebase.`);
+  }
+
+  groups._mobileStats={
+    numberedRows:directNumberedRows,
+    uniqueProducts:directUnique.size,
+    repeatedRows:directNumberedRows-directUnique.size
+  };
+  return groups.filter(g=>g.products.length);
+}
+
 function classifyGroupProducts(group){
   // Preserve the visible Excel hierarchy/order exactly within each family section.
   const products=[...group.products].sort((a,b)=>(a.sourceRow??0)-(b.sourceRow??0));
@@ -2328,14 +2540,19 @@ function renderWorkbookImportPreview(){
   const selectedSheets=selectedImportSheets();
   const counts=compareImport({sheets:selectedSheets});
   const rows=selectedGroups.map(g=>{
-    const count=selectedSheets.filter(s=>g.sheets.includes(s.name)).reduce((n,s)=>n+s.groups.reduce((x,grp)=>x+grp.products.length,0),0);
-    return `<tr><td style="padding:5px 8px"><strong>${esc(g.label)}</strong></td><td style="padding:5px 8px;color:#667085">${esc(g.sheets.join(" + "))}</td><td style="padding:5px 8px;text-align:right">${count}</td></tr>`;
+    const groupSheets=selectedSheets.filter(s=>g.sheets.includes(s.name));
+    const count=groupSheets.reduce((n,s)=>n+s.groups.reduce((x,grp)=>x+grp.products.length,0),0);
+    const mobile=groupSheets.find(s=>s.name==="Mobile_NA" && s.stats);
+    const detail=mobile
+      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} numbered Excel rows, ${mobile.stats.uniqueProducts} unique part numbers, ${mobile.stats.repeatedRows} repeated placements skipped</small>`
+      : "";
+    return `<tr><td style="padding:5px 8px"><strong>${esc(g.label)}</strong>${detail}</td><td style="padding:5px 8px;color:#667085">${esc(g.sheets.join(" + "))}</td><td style="padding:5px 8px;text-align:right">${count}</td></tr>`;
   }).join("");
   excelImportPreview.innerHTML=`
     <strong>Selected import preview</strong><br>
     ${selectedGroups.length ? `<table style="width:100%;border-collapse:collapse;margin-top:8px"><tbody>${rows}</tbody></table><br>
     <strong>Preview:</strong> ${counts.added} new, ${counts.updated} updates, ${counts.unchanged} unchanged (${counts.total} products total).` : `Select at least one product group above.`}<br>
-    <span style="color:#667085">Products and family sections are imported in the same visible top-to-bottom order as the Excel sheet. Horizontally merged Excel headings are treated as sections, while vertically merged description rows stay attached to their product(s). Hidden Excel rows are ignored. Options & Spares also runs a direct Art. no. completeness audit before import so numbered products cannot be silently skipped. Existing products are matched by part number and moved to their Excel position. Leading zeroes are ignored only for matching, then the exact Excel-formatted part number is saved. Existing images/PDFs are preserved. Nothing is automatically deleted.</span>`;
+    <span style="color:#667085">Products and family sections are imported in the same visible top-to-bottom order as the Excel sheet. Mobile_NA uses a dedicated parser: real Art. no. rows only, product names are taken from the correct B/C product column, shared descriptions are attached only to their matching variants, and repeated accessory part numbers are kept once at their first Excel position. Hidden Excel rows are ignored. Options & Spares also runs a direct Art. no. completeness audit before import so numbered products cannot be silently skipped. Existing products are matched by part number and moved to their Excel position. Leading zeroes are ignored only for matching, then the exact Excel-formatted part number is saved. Existing images/PDFs are preserved. Nothing is automatically deleted.</span>`;
   excelImportPreview.style.display="block";
   runExcelImportBtn.disabled=selectedGroups.length===0;
 }
@@ -2360,7 +2577,17 @@ excelImportFile?.addEventListener("change",async()=>{
     const missing=SUPPORTED_IMPORT_SHEETS.filter(n=>!workbook.Sheets[n]);
     if(missing.length)throw new Error(`Missing required sheet(s): ${missing.join(", ")}`);
     const pricingMap=buildPricingMap(workbook);
-    const sheets=SUPPORTED_IMPORT_SHEETS.map(name=>({name,category:SHEET_CATEGORY[name],groups:parseSupportedSheet(workbook,name,pricingMap)}));
+    const sheets=SUPPORTED_IMPORT_SHEETS.map(name=>{
+      const groups=name==="Mobile_NA"
+        ? parseMobileNASheet(workbook,pricingMap)
+        : parseSupportedSheet(workbook,name,pricingMap);
+      return {
+        name,
+        category:SHEET_CATEGORY[name],
+        groups,
+        stats:name==="Mobile_NA" ? groups._mobileStats : null
+      };
+    });
     parsedWorkbookImport={sheets};
     renderImportGroupChoices();
     renderWorkbookImportPreview();
