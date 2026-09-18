@@ -1008,6 +1008,9 @@ Use either a PDF upload or a PDF link. If both are provided, the uploaded PDF wi
 <div class="manage-modal-backdrop" id="excelImportBackdrop">
 <section class="manage-panel">
 <h2>Import Products from Excel</h2>
+<div style="display:inline-flex;align-items:center;margin:0 0 10px;padding:5px 9px;border-radius:7px;background:#fff7d6;border:1px solid #ffcb1f;color:#5f4a00;font-size:11px;font-weight:700;">
+  MOBILE IMPORTER v4 · REPEATED PLACEMENTS ENABLED
+</div>
 <p class="manage-note">
 Upload the Plymovent North America price-list workbook, then choose which portal product groups you want to import. Arms combines Arms_NA + Arms_TG, and Fans combines Fans_NA + Fan_control_NA.
 </p>
@@ -2769,7 +2772,7 @@ function renderWorkbookImportPreview(){
     const count=groupSheets.reduce((n,s)=>n+s.groups.reduce((x,grp)=>x+grp.products.length,0),0);
     const mobile=groupSheets.find(s=>s.name==="Mobile_NA" && s.stats);
     const detail=mobile
-      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} Excel product placements, ${mobile.stats.uniquePartNumbers} unique part numbers, ${mobile.stats.repeatedPlacements} repeated placements will be created as separate product records</small>`
+      ? `<br><small style="display:inline-block;margin-top:5px;padding:5px 8px;border-radius:6px;background:#fff7d6;border:1px solid #ffcb1f;color:#5f4a00;font-weight:700">Mobile_NA diagnostic: ${mobile.stats.numberedRows} numbered Excel placements · ${mobile.stats.uniquePartNumbers} unique part numbers · ${mobile.stats.repeatedPlacements} repeated placements INCLUDED</small>`
       : "";
     return `<tr><td style="padding:5px 8px"><strong>${esc(g.label)}</strong>${detail}</td><td style="padding:5px 8px;color:#667085">${esc(g.sheets.join(" + "))}</td><td style="padding:5px 8px;text-align:right">${count}</td></tr>`;
   }).join("");
