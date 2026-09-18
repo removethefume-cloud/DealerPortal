@@ -738,6 +738,93 @@ tbody img:hover, td img:hover { z-index: 2 !important; }
 #deleteTabProductsBtn {
   pointer-events: auto !important;
 }
+
+.bulk-delete-backdrop{
+  position:fixed;
+  inset:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+  background:rgba(15,23,42,.45);
+  backdrop-filter:blur(3px);
+  z-index:5000;
+}
+.bulk-delete-backdrop.open{display:flex;}
+.bulk-delete-modal{
+  width:min(480px,100%);
+  background:#fff;
+  border:1px solid #e4e7ec;
+  border-radius:16px;
+  box-shadow:0 24px 70px rgba(15,23,42,.22);
+  padding:26px;
+  text-align:left;
+}
+.bulk-delete-icon{
+  width:42px;
+  height:42px;
+  display:grid;
+  place-items:center;
+  border-radius:50%;
+  background:#fee4e2;
+  color:#b42318;
+  font-weight:800;
+  font-size:20px;
+  margin-bottom:14px;
+}
+.bulk-delete-modal h2{margin:0 0 8px;font-size:22px;color:#101828;}
+.bulk-delete-modal p{margin:0 0 14px;color:#475467;line-height:1.5;}
+.bulk-delete-warning{
+  margin:0 0 18px;
+  padding:12px 14px;
+  border-radius:10px;
+  background:#fff4ed;
+  color:#9c2a10;
+  font-size:13px;
+  line-height:1.5;
+}
+.bulk-delete-modal label{display:block;margin-bottom:7px;font-size:13px;color:#344054;}
+.bulk-delete-modal input{
+  width:100%;
+  box-sizing:border-box;
+  border:1px solid #d0d5dd;
+  border-radius:9px;
+  padding:11px 12px;
+  font:inherit;
+  outline:none;
+}
+.bulk-delete-modal input:focus{border-color:#98a2b3;box-shadow:0 0 0 3px rgba(152,162,179,.16);}
+.bulk-delete-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px;}
+.bulk-delete-confirm{
+  border:1px solid #d92d20;
+  border-radius:8px;
+  background:#d92d20;
+  color:#fff;
+  padding:10px 15px;
+  font-weight:700;
+  cursor:pointer;
+}
+.bulk-delete-confirm:disabled{opacity:.45;cursor:not-allowed;}
+.bulk-delete-toast{
+  position:fixed;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%) scale(.96);
+  display:none;
+  max-width:min(420px,calc(100vw - 40px));
+  padding:14px 18px;
+  border-radius:12px;
+  background:#101828;
+  color:#fff;
+  box-shadow:0 18px 50px rgba(15,23,42,.25);
+  z-index:5100;
+  font-size:14px;
+  font-weight:600;
+  text-align:center;
+}
+.bulk-delete-toast.show{display:block;animation:bulkToastIn .18s ease forwards;}
+@keyframes bulkToastIn{to{transform:translate(-50%,-50%) scale(1);}}
+
 </style>
 </head>
 <body>
@@ -941,6 +1028,27 @@ Upload the Plymovent North America price-list workbook, then choose which portal
 </section>
 </div>
 
+
+<div class="bulk-delete-backdrop" id="bulkDeleteBackdrop" aria-hidden="true">
+  <section class="bulk-delete-modal" role="dialog" aria-modal="true" aria-labelledby="bulkDeleteTitle">
+    <div class="bulk-delete-icon">!</div>
+    <h2 id="bulkDeleteTitle">Delete Category Products</h2>
+    <p id="bulkDeleteSummary"></p>
+    <div class="bulk-delete-warning">
+      This deletes the product records and their A-Level/B-Level prices.
+      The category itself, section headers, uploaded images and PDF files will remain.
+    </div>
+    <label for="bulkDeleteConfirmInput">Type <strong>DELETE</strong> to confirm</label>
+    <input id="bulkDeleteConfirmInput" type="text" autocomplete="off" placeholder="DELETE">
+    <div class="bulk-delete-actions">
+      <button type="button" class="manage-cancel" id="cancelBulkDeleteBtn">Cancel</button>
+      <button type="button" class="bulk-delete-confirm" id="confirmBulkDeleteBtn" disabled>Delete All Products</button>
+    </div>
+  </section>
+</div>
+
+<div class="bulk-delete-toast" id="bulkDeleteToast" aria-live="polite"></div>
+
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
@@ -976,6 +1084,13 @@ const catalogStatus = document.getElementById("catalogStatus");
 
 const manageProductsBtn = document.getElementById("manageProductsBtn");
 const deleteTabProductsBtn = document.getElementById("deleteTabProductsBtn");
+const bulkDeleteBackdrop = document.getElementById("bulkDeleteBackdrop");
+const bulkDeleteSummary = document.getElementById("bulkDeleteSummary");
+const bulkDeleteConfirmInput = document.getElementById("bulkDeleteConfirmInput");
+const confirmBulkDeleteBtn = document.getElementById("confirmBulkDeleteBtn");
+const cancelBulkDeleteBtn = document.getElementById("cancelBulkDeleteBtn");
+const bulkDeleteToast = document.getElementById("bulkDeleteToast");
+let pendingBulkDelete = null;
 const addCategoryBtn = document.getElementById("addCategoryBtn");
 const manageModalBackdrop = document.getElementById("manageModalBackdrop");
 const addProductForm = document.getElementById("addProductForm");
@@ -1775,7 +1890,23 @@ function bindAdminRowButtons() {
   });
 
   
-deleteTabProductsBtn?.addEventListener("click", async () => {
+
+function closeBulkDeleteModal(){
+  bulkDeleteBackdrop?.classList.remove("open");
+  bulkDeleteBackdrop?.setAttribute("aria-hidden","true");
+  if(bulkDeleteConfirmInput) bulkDeleteConfirmInput.value="";
+  if(confirmBulkDeleteBtn) confirmBulkDeleteBtn.disabled=true;
+  pendingBulkDelete=null;
+}
+
+function showBulkDeleteToast(message, duration=1800){
+  if(!bulkDeleteToast)return;
+  bulkDeleteToast.textContent=message;
+  bulkDeleteToast.classList.add("show");
+  window.setTimeout(()=>bulkDeleteToast.classList.remove("show"),duration);
+}
+
+deleteTabProductsBtn?.addEventListener("click", () => {
   if(!isAdmin() || activeCategory==="all") return;
 
   const category=getCombinedCategories().find(c=>c.value===activeCategory);
@@ -1783,48 +1914,72 @@ deleteTabProductsBtn?.addEventListener("click", async () => {
   const productsToDelete=firestoreProducts.filter(p=>p.category===activeCategory);
 
   if(!productsToDelete.length){
-    alert(`There are no products in ${categoryName}.`);
+    showBulkDeleteToast(`There are no products in ${categoryName}.`);
     return;
   }
 
-  const warning =
-    `Delete ALL ${productsToDelete.length} products from "${categoryName}"?\n\n` +
-    `This deletes the product records and their A-Level/B-Level prices.\n` +
-    `The category itself, section headers, uploaded images and PDF files will remain.\n\n` +
-    `This action cannot be undone.`;
+  pendingBulkDelete={categoryName,productsToDelete};
+  bulkDeleteSummary.textContent=
+    `You are about to permanently delete all ${productsToDelete.length} products from "${categoryName}".`;
+  bulkDeleteConfirmInput.value="";
+  confirmBulkDeleteBtn.disabled=true;
+  bulkDeleteBackdrop.classList.add("open");
+  bulkDeleteBackdrop.setAttribute("aria-hidden","false");
+  window.setTimeout(()=>bulkDeleteConfirmInput.focus(),50);
+});
 
-  if(!window.confirm(warning)) return;
+bulkDeleteConfirmInput?.addEventListener("input",()=>{
+  confirmBulkDeleteBtn.disabled=bulkDeleteConfirmInput.value.trim()!=="DELETE";
+});
 
-  const typed=window.prompt(
-    `For safety, type DELETE to permanently remove all ${productsToDelete.length} products from "${categoryName}".`
-  );
-  if(typed!=="DELETE") return;
+cancelBulkDeleteBtn?.addEventListener("click",closeBulkDeleteModal);
+bulkDeleteBackdrop?.addEventListener("click",e=>{
+  if(e.target===bulkDeleteBackdrop)closeBulkDeleteModal();
+});
 
+confirmBulkDeleteBtn?.addEventListener("click", async ()=>{
+  if(!pendingBulkDelete || bulkDeleteConfirmInput.value.trim()!=="DELETE")return;
+
+  const {categoryName,productsToDelete}=pendingBulkDelete;
   const originalText=deleteTabProductsBtn.textContent;
+
+  // Close the confirmation immediately. Deletion continues in the background
+  // while the category button itself shows progress.
+  closeBulkDeleteModal();
   deleteTabProductsBtn.disabled=true;
 
   try{
     const chunkSize=40;
     for(let i=0;i<productsToDelete.length;i+=chunkSize){
       const chunk=productsToDelete.slice(i,i+chunkSize);
-      deleteTabProductsBtn.textContent=`Deleting ${Math.min(i+chunk.length,productsToDelete.length)}/${productsToDelete.length}...`;
+      deleteTabProductsBtn.textContent=
+        `Deleting ${Math.min(i+chunk.length,productsToDelete.length)}/${productsToDelete.length}...`;
+
       await Promise.all(chunk.flatMap(product=>[
         deleteDoc(doc(db,"products",product.id)),
         deleteDoc(doc(db,"pricesA",product.id)),
         deleteDoc(doc(db,"pricesB",product.id))
       ]));
     }
+
     await loadProductsFromFirestore();
-    alert(`All ${productsToDelete.length} products were deleted from "${categoryName}".`);
+    showBulkDeleteToast(
+      `All ${productsToDelete.length} products were deleted from "${categoryName}".`,
+      2200
+    );
   }catch(error){
     console.error(error);
-    alert("Bulk delete stopped because of an error. Reload the page to see what remains before trying again.");
+    showBulkDeleteToast(
+      "Bulk delete stopped because of an error. Reload the page to see what remains.",
+      3200
+    );
     await loadProductsFromFirestore();
   }finally{
     deleteTabProductsBtn.textContent=originalText;
     syncDeleteTabProductsButton();
   }
 });
+
 
 document.querySelectorAll(".delete-product-btn").forEach(btn => {
     btn.onclick = async () => {
