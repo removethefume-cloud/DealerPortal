@@ -2556,7 +2556,7 @@ function parseMobileNASheet(workbook,pricingMap){
         partNumber:part,
         matchKey:key,
         importSourceSheet:"Mobile_NA",
-        importPlacementKey:`Mobile_NA|${sectionTitle}|${key}|${name}|${d}|row:${r}`,
+        importPlacementKey:`Mobile_NA|row:${r}|${key}`,
         priceA:pricing.priceA,
         priceB:pricing.priceB,
         sourceRow:r
@@ -2621,6 +2621,73 @@ function parseMobileNASheet(workbook,pricingMap){
   // Sort exactly in the same top-to-bottom sequence as Mobile_NA.
   groups.forEach(g=>g.products.sort((a,b)=>(a.sourceRow??0)-(b.sourceRow??0)));
 
+  // Mobile_NA intentionally repeats the same Art. no. under different parent
+  // products (for example MFD and MFS). Every numbered Excel row is a separate
+  // catalogue placement. Rescue any numbered row that was not represented by
+  // its exact source row, regardless of whether that part number already exists.
+  const parsedRows=new Set(groups.flatMap(g=>g.products.map(p=>p.sourceRow)));
+  let lastGroup=groups[0]||null;
+  let lastFamily="Mobile_NA";
+
+  for(let r=cols.headerRow+1;r<=range.e.r;r++){
+    if(sheet["!rows"]?.[r]?.hidden) continue;
+
+    const b=directAt(r,cols.type).trim();
+    const c=directAt(r,cols.description).trim();
+    const d=directAt(r,cols.specification).trim();
+    const part=partAt(r).trim();
+    const key=normalizePartNumber(part);
+
+    // Track context even on non-product rows so rescued products land in the
+    // same hierarchy as their Excel placement.
+    if(!key){
+      if(b && c){
+        lastFamily=b;
+        const title=`${b} - ${c}`;
+        lastGroup=groups.find(g=>g.title===title)||lastGroup;
+      }else if(b && !c){
+        const title=lastFamily ? `${lastFamily} - ${b}` : b;
+        lastGroup=groups.find(g=>g.title===title)||lastGroup;
+      }
+      continue;
+    }
+
+    if(parsedRows.has(r)) {
+      const found=groups.find(g=>g.products.some(p=>p.sourceRow===r));
+      if(found) lastGroup=found;
+      continue;
+    }
+
+    if(!lastGroup){
+      lastGroup={title:lastFamily||"Mobile",products:[]};
+      groups.push(lastGroup);
+    }
+
+    let name=b||c||part;
+    let description=b&&c&&c!==b ? c : "";
+    const pricing=pricingMap.get(key)||{};
+
+    const rescued={
+      name,
+      productType:lastFamily||b||"Mobile_NA",
+      description,
+      specifications:d,
+      partNumber:part,
+      matchKey:key,
+      importSourceSheet:"Mobile_NA",
+      importPlacementKey:`Mobile_NA|row:${r}|${key}`,
+      priceA:pricing.priceA,
+      priceB:pricing.priceB,
+      sourceRow:r
+    };
+
+    lastGroup.products.push(rescued);
+    parsedRows.add(r);
+  }
+
+  // Re-sort after the rescue pass.
+  groups.forEach(g=>g.products.sort((a,b)=>(a.sourceRow??0)-(b.sourceRow??0)));
+
   // Safety audit: every visible numbered Excel row must become a portal row,
   // even when its part number is also used under another mobile product family.
   const directUnique=new Set();
@@ -2635,7 +2702,7 @@ function parseMobileNASheet(workbook,pricingMap){
   }
   const parsedCount=groups.reduce((n,g)=>n+g.products.length,0);
   if(parsedCount!==directNumberedRows){
-    throw new Error(`Mobile_NA validation failed: Excel has ${directNumberedRows} numbered product rows but the importer recognized ${parsedCount}. Import stopped before writing to Firebase.`);
+    throw new Error(`Mobile_NA validation failed: Excel has ${directNumberedRows} numbered product placements but the importer recognized ${parsedCount}. Repeated part numbers must also be imported. Import stopped before writing to Firebase.`);
   }
 
   groups._mobileStats={
@@ -2702,7 +2769,7 @@ function renderWorkbookImportPreview(){
     const count=groupSheets.reduce((n,s)=>n+s.groups.reduce((x,grp)=>x+grp.products.length,0),0);
     const mobile=groupSheets.find(s=>s.name==="Mobile_NA" && s.stats);
     const detail=mobile
-      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} numbered Excel rows, ${mobile.stats.uniquePartNumbers} unique part numbers, ${mobile.stats.repeatedPlacements} repeated placements will also be imported</small>`
+      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} Excel product placements, ${mobile.stats.uniquePartNumbers} unique part numbers, ${mobile.stats.repeatedPlacements} repeated placements will be imported separately</small>`
       : "";
     return `<tr><td style="padding:5px 8px"><strong>${esc(g.label)}</strong>${detail}</td><td style="padding:5px 8px;color:#667085">${esc(g.sheets.join(" + "))}</td><td style="padding:5px 8px;text-align:right">${count}</td></tr>`;
   }).join("");
@@ -2710,7 +2777,7 @@ function renderWorkbookImportPreview(){
     <strong>Selected import preview</strong><br>
     ${selectedGroups.length ? `<table style="width:100%;border-collapse:collapse;margin-top:8px"><tbody>${rows}</tbody></table><br>
     <strong>Preview:</strong> ${counts.added} new, ${counts.updated} updates, ${counts.unchanged} unchanged (${counts.total} products total).` : `Select at least one product group above.`}<br>
-    <span style="color:#667085">Products and family sections are imported in the same visible top-to-bottom order as the Excel sheet. Mobile_NA uses a dedicated parser: every visible Art. no. row is imported in its Excel position. If the same part number is used under MFD, MFS, or another mobile family, each placement is kept as a separate portal product. Product names are taken from the correct B/C product column and shared descriptions stay with their matching variants. Hidden Excel rows are ignored. Options & Spares also runs a direct Art. no. completeness audit before import so numbered products cannot be silently skipped. Existing products are matched by part number and moved to their Excel position. Leading zeroes are ignored only for matching, then the exact Excel-formatted part number is saved. Existing images/PDFs are preserved. Nothing is automatically deleted.</span>`;
+    <span style="color:#667085">Products and family sections are imported in the same visible top-to-bottom order as the Excel sheet. Mobile_NA uses a dedicated parser: every visible Art. no. row is a separate portal placement. If the same part number appears under MFD, MFS, or another mobile family, every occurrence is imported separately in its original Excel position. Product names are taken from the correct B/C product column and shared descriptions stay with their matching variants. Hidden Excel rows are ignored. Options & Spares also runs a direct Art. no. completeness audit before import so numbered products cannot be silently skipped. Existing products are matched by part number and moved to their Excel position. Leading zeroes are ignored only for matching, then the exact Excel-formatted part number is saved. Existing images/PDFs are preserved. Nothing is automatically deleted.</span>`;
   excelImportPreview.style.display="block";
   runExcelImportBtn.disabled=selectedGroups.length===0;
 }
