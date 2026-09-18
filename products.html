@@ -2556,7 +2556,7 @@ function parseMobileNASheet(workbook,pricingMap){
         partNumber:part,
         matchKey:key,
         importSourceSheet:"Mobile_NA",
-        importPlacementKey:`Mobile_NA|row:${r}|${key}`,
+        importPlacementKey:`Mobile_NA|row:${r + 1}|${key}`,
         priceA:pricing.priceA,
         priceB:pricing.priceB,
         sourceRow:r
@@ -2675,7 +2675,7 @@ function parseMobileNASheet(workbook,pricingMap){
       partNumber:part,
       matchKey:key,
       importSourceSheet:"Mobile_NA",
-      importPlacementKey:`Mobile_NA|row:${r}|${key}`,
+      importPlacementKey:`Mobile_NA|row:${r + 1}|${key}`,
       priceA:pricing.priceA,
       priceB:pricing.priceB,
       sourceRow:r
@@ -2769,7 +2769,7 @@ function renderWorkbookImportPreview(){
     const count=groupSheets.reduce((n,s)=>n+s.groups.reduce((x,grp)=>x+grp.products.length,0),0);
     const mobile=groupSheets.find(s=>s.name==="Mobile_NA" && s.stats);
     const detail=mobile
-      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} Excel product placements, ${mobile.stats.uniquePartNumbers} unique part numbers, ${mobile.stats.repeatedPlacements} repeated placements will be imported separately</small>`
+      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} Excel product placements, ${mobile.stats.uniquePartNumbers} unique part numbers, ${mobile.stats.repeatedPlacements} repeated placements will be created as separate product records</small>`
       : "";
     return `<tr><td style="padding:5px 8px"><strong>${esc(g.label)}</strong>${detail}</td><td style="padding:5px 8px;color:#667085">${esc(g.sheets.join(" + "))}</td><td style="padding:5px 8px;text-align:right">${count}</td></tr>`;
   }).join("");
@@ -2856,7 +2856,12 @@ runExcelImportBtn?.addEventListener("click",async()=>{
           const old=item.importPlacementKey
             ? existingByPlacement.get(item.importPlacementKey)
             : existingByPart.get(item.matchKey);
-          const productId=old?.id||doc(collection(db,"products")).id;
+          // Mobile_NA is placement-based, not SKU-based. The same part number
+          // can legitimately appear under several mobile products. Each Excel
+          // row therefore gets its own stable Firestore document ID.
+          const productId=item.importSourceSheet==="Mobile_NA" && Number.isInteger(item.sourceRow)
+            ? `mobile_na_row_${item.sourceRow + 1}_${item.matchKey}`
+            : (old?.id||doc(collection(db,"products")).id);
           if(i===0)mainId=productId;
           const data={
             name:item.name,productType:item.productType,description:item.description||old?.description||"",specifications:item.specifications,
@@ -2878,6 +2883,21 @@ runExcelImportBtn?.addEventListener("click",async()=>{
       }
     }
     await loadCategories(); await loadSections(); await loadProductsFromFirestore();
+
+    if(sheetsToImport.some(s=>s.name==="Mobile_NA")){
+      const expectedMobile=sheetsToImport
+        .filter(s=>s.name==="Mobile_NA")
+        .reduce((n,s)=>n+s.groups.reduce((x,g)=>x+g.products.length,0),0);
+      const actualMobile=firestoreProducts.filter(p=>p.importSourceSheet==="Mobile_NA").length;
+
+      if(actualMobile!==expectedMobile){
+        throw new Error(
+          `Mobile_NA write verification failed: ${expectedMobile} Excel placements were expected, ` +
+          `but Firebase contains ${actualMobile} Mobile_NA imported records.`
+        );
+      }
+    }
+
     excelImportMessage.style.color="#166534"; excelImportMessage.textContent=`Import complete: ${imported} products processed.`;
     setTimeout(closeExcelImport,1200);
   }catch(error){
