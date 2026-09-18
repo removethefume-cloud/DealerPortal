@@ -2320,9 +2320,7 @@ function parseMobileNASheet(workbook,pricingMap){
   let currentSection="";
   let recentVariantRows=[];
   let previousProduct=null;
-  const seen=new Set();
   let numberedRows=0;
-  let repeatedRows=0;
 
   const ensureGroup=(title)=>{
     const clean=(title||"Mobile").trim();
@@ -2369,14 +2367,6 @@ function parseMobileNASheet(workbook,pricingMap){
     if(key){
       numberedRows++;
 
-      // The workbook repeats some accessories under more than one mobile unit.
-      // Keep one portal product per part number and preserve the first Excel placement.
-      if(seen.has(key)){
-        repeatedRows++;
-        continue;
-      }
-      seen.add(key);
-
       let name="";
       let description="";
 
@@ -2410,6 +2400,8 @@ function parseMobileNASheet(workbook,pricingMap){
         specifications:d,
         partNumber:part,
         matchKey:key,
+        importSourceSheet:"Mobile_NA",
+        importPlacementKey:`Mobile_NA|${sectionTitle}|${key}|${name}|${d}|row:${r}`,
         priceA:pricing.priceA,
         priceB:pricing.priceB,
         sourceRow:r
@@ -2474,7 +2466,8 @@ function parseMobileNASheet(workbook,pricingMap){
   // Sort exactly in the same top-to-bottom sequence as Mobile_NA.
   groups.forEach(g=>g.products.sort((a,b)=>(a.sourceRow??0)-(b.sourceRow??0)));
 
-  // Safety audit: every unique real Art. no. on Mobile_NA must be represented.
+  // Safety audit: every visible numbered Excel row must become a portal row,
+  // even when its part number is also used under another mobile product family.
   const directUnique=new Set();
   let directNumberedRows=0;
   for(let r=cols.headerRow+1;r<=range.e.r;r++){
@@ -2485,16 +2478,16 @@ function parseMobileNASheet(workbook,pricingMap){
     directNumberedRows++;
     directUnique.add(key);
   }
-  const parsedKeys=new Set(groups.flatMap(g=>g.products.map(p=>p.matchKey).filter(Boolean)));
-  const missing=[...directUnique].filter(k=>!parsedKeys.has(k));
-  if(missing.length){
-    throw new Error(`Mobile_NA validation failed: ${missing.length} unique numbered product(s) were not recognized. Import stopped before writing to Firebase.`);
+  const parsedCount=groups.reduce((n,g)=>n+g.products.length,0);
+  if(parsedCount!==directNumberedRows){
+    throw new Error(`Mobile_NA validation failed: Excel has ${directNumberedRows} numbered product rows but the importer recognized ${parsedCount}. Import stopped before writing to Firebase.`);
   }
 
   groups._mobileStats={
     numberedRows:directNumberedRows,
-    uniqueProducts:directUnique.size,
-    repeatedRows:directNumberedRows-directUnique.size
+    uniquePartNumbers:directUnique.size,
+    repeatedPlacements:directNumberedRows-directUnique.size,
+    importedRows:parsedCount
   };
   return groups.filter(g=>g.products.length);
 }
@@ -2510,14 +2503,24 @@ function classifyGroupProducts(group){
   return products.map((p,i)=>({...p,itemType:useVariants&&i>0?"variant":"main",parentIndex:useVariants&&i>0?0:-1}));
 }
 function compareImport(importData){
-  const existing=new Map(firestoreProducts.filter(p=>p.partNumber).map(p=>[normalizePartNumber(p.partNumber),p]));
+  const existingByPart=new Map(firestoreProducts.filter(p=>p.partNumber).map(p=>[normalizePartNumber(p.partNumber),p]));
+  const existingByPlacement=new Map(
+    firestoreProducts.filter(p=>p.importPlacementKey).map(p=>[p.importPlacementKey,p])
+  );
   let added=0,updated=0,unchanged=0,total=0;
   importData.sheets.forEach(s=>s.groups.forEach(g=>classifyGroupProducts(g).forEach(p=>{
     total++;
-    const old=existing.get(p.matchKey);
+    const old=p.importPlacementKey
+      ? existingByPlacement.get(p.importPlacementKey)
+      : existingByPart.get(p.matchKey);
     if(!old){added++;return;}
     const a=safePrice(old.priceA), b=safePrice(old.priceB);
-    const same=String(old.name||"")===p.name && String(old.specifications||"")===p.specifications && String(old.partNumber||"")===p.partNumber && (p.priceA==null||a===p.priceA) && (p.priceB==null||b===p.priceB);
+    const same=String(old.name||"")===p.name &&
+      String(old.specifications||"")===p.specifications &&
+      String(old.partNumber||"")===p.partNumber &&
+      String(old.description||"")===String(p.description||"") &&
+      (p.priceA==null||a===p.priceA) &&
+      (p.priceB==null||b===p.priceB);
     same?unchanged++:updated++;
   })));
   return {total,added,updated,unchanged};
@@ -2544,7 +2547,7 @@ function renderWorkbookImportPreview(){
     const count=groupSheets.reduce((n,s)=>n+s.groups.reduce((x,grp)=>x+grp.products.length,0),0);
     const mobile=groupSheets.find(s=>s.name==="Mobile_NA" && s.stats);
     const detail=mobile
-      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} numbered Excel rows, ${mobile.stats.uniqueProducts} unique part numbers, ${mobile.stats.repeatedRows} repeated placements skipped</small>`
+      ? `<br><small style="color:#667085">${mobile.stats.numberedRows} numbered Excel rows, ${mobile.stats.uniquePartNumbers} unique part numbers, ${mobile.stats.repeatedPlacements} repeated placements will also be imported</small>`
       : "";
     return `<tr><td style="padding:5px 8px"><strong>${esc(g.label)}</strong>${detail}</td><td style="padding:5px 8px;color:#667085">${esc(g.sheets.join(" + "))}</td><td style="padding:5px 8px;text-align:right">${count}</td></tr>`;
   }).join("");
@@ -2552,7 +2555,7 @@ function renderWorkbookImportPreview(){
     <strong>Selected import preview</strong><br>
     ${selectedGroups.length ? `<table style="width:100%;border-collapse:collapse;margin-top:8px"><tbody>${rows}</tbody></table><br>
     <strong>Preview:</strong> ${counts.added} new, ${counts.updated} updates, ${counts.unchanged} unchanged (${counts.total} products total).` : `Select at least one product group above.`}<br>
-    <span style="color:#667085">Products and family sections are imported in the same visible top-to-bottom order as the Excel sheet. Mobile_NA uses a dedicated parser: real Art. no. rows only, product names are taken from the correct B/C product column, shared descriptions are attached only to their matching variants, and repeated accessory part numbers are kept once at their first Excel position. Hidden Excel rows are ignored. Options & Spares also runs a direct Art. no. completeness audit before import so numbered products cannot be silently skipped. Existing products are matched by part number and moved to their Excel position. Leading zeroes are ignored only for matching, then the exact Excel-formatted part number is saved. Existing images/PDFs are preserved. Nothing is automatically deleted.</span>`;
+    <span style="color:#667085">Products and family sections are imported in the same visible top-to-bottom order as the Excel sheet. Mobile_NA uses a dedicated parser: every visible Art. no. row is imported in its Excel position. If the same part number is used under MFD, MFS, or another mobile family, each placement is kept as a separate portal product. Product names are taken from the correct B/C product column and shared descriptions stay with their matching variants. Hidden Excel rows are ignored. Options & Spares also runs a direct Art. no. completeness audit before import so numbered products cannot be silently skipped. Existing products are matched by part number and moved to their Excel position. Leading zeroes are ignored only for matching, then the exact Excel-formatted part number is saved. Existing images/PDFs are preserved. Nothing is automatically deleted.</span>`;
   excelImportPreview.style.display="block";
   runExcelImportBtn.disabled=selectedGroups.length===0;
 }
@@ -2613,7 +2616,10 @@ runExcelImportBtn?.addEventListener("click",async()=>{
   if(!isAdmin()||!parsedWorkbookImport)return;
   runExcelImportBtn.disabled=true; excelImportMessage.style.display="block"; excelImportMessage.style.color="#667085"; excelImportMessage.textContent="Importing workbook...";
   try{
-    const existing=new Map(firestoreProducts.filter(p=>p.partNumber).map(p=>[normalizePartNumber(p.partNumber),p]));
+    const existingByPart=new Map(firestoreProducts.filter(p=>p.partNumber).map(p=>[normalizePartNumber(p.partNumber),p]));
+    const existingByPlacement=new Map(
+      firestoreProducts.filter(p=>p.importPlacementKey).map(p=>[p.importPlacementKey,p])
+    );
     let imported=0, baseOrder=Date.now();
     const sheetsToImport=selectedImportSheets();
     if(!sheetsToImport.length)throw new Error("Select at least one product group to import.");
@@ -2625,12 +2631,16 @@ runExcelImportBtn?.addEventListener("click",async()=>{
         let mainId="";
         for(let i=0;i<classified.length;i++){
           const item=classified[i];
-          const old=existing.get(item.matchKey);
+          const old=item.importPlacementKey
+            ? existingByPlacement.get(item.importPlacementKey)
+            : existingByPart.get(item.matchKey);
           const productId=old?.id||doc(collection(db,"products")).id;
           if(i===0)mainId=productId;
           const data={
             name:item.name,productType:item.productType,description:item.description||old?.description||"",specifications:item.specifications,
             partNumber:item.partNumber,category,sectionId,itemType:item.itemType,isSubProduct:false,parentProductId:item.itemType==="variant"?mainId:"",
+            importSourceSheet:item.importSourceSheet||old?.importSourceSheet||"",
+            importPlacementKey:item.importPlacementKey||old?.importPlacementKey||"",
             active:old?.active!==false,displayOrder:baseOrder++,updatedAt:serverTimestamp()
           };
           if(!old)data.createdAt=serverTimestamp();
@@ -2638,7 +2648,9 @@ runExcelImportBtn?.addEventListener("click",async()=>{
           await setDoc(doc(db,"products",productId),data,{merge:true});
           if(item.priceA!=null)await setDoc(doc(db,"pricesA",productId),{price:item.priceA,currency:"USD",updatedAt:serverTimestamp()},{merge:true});
           if(item.priceB!=null)await setDoc(doc(db,"pricesB",productId),{price:item.priceB,currency:"USD",updatedAt:serverTimestamp()},{merge:true});
-          existing.set(item.matchKey,{...(old||{}),...data,id:productId,priceA:item.priceA??old?.priceA,priceB:item.priceB??old?.priceB});
+          const saved={...(old||{}),...data,id:productId,priceA:item.priceA??old?.priceA,priceB:item.priceB??old?.priceB};
+          if(item.importPlacementKey)existingByPlacement.set(item.importPlacementKey,saved);
+          else existingByPart.set(item.matchKey,saved);
           imported++;
         }
       }
